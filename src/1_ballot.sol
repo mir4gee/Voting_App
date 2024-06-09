@@ -2,7 +2,19 @@
 
 pragma solidity ^0.8.0;
 
+import "@chainlink/contracts/src/v0.8/interfaces/KeeperCompatibleInterface.sol;
+
 contract ballot {
+    error AlreadyRegistered();
+    error NotRegistered();
+    error NotOwner();
+    error NotCandidate();
+    error NotVoter();
+    error AlreadyVoted();
+    error NoVotesCasted();
+    error RegistrationOpen();
+    error VotingOpen();
+    error EndedState();
     struct voter {
         bool voted;
         address vote;
@@ -14,208 +26,281 @@ contract ballot {
         address CandidateId;
     }
 
-    // candidate[] s_candidateList;
-    // voter[] s_voterList;
-    mapping(address => candidate) candidateList;
-    mapping(address => voter) voterList;
-    address[] private candidate_List;
-    address[] private voter_List;
+    enum State {
+        Registration,
+        Voting,
+        Ended
+    }
+
+    uint256 private constant REG_TIME = 1 days;
+    uint256 private constant VOT_TIME = 1 days;
+    mapping(address => candidate) s_candidateList;
+    mapping(address => voter) s_voterList;
+    address[] private s_candidate_List;
+    address[] private s_voter_List;
     address private owner;
     address private winner;
-    uint public totalCandidates;
-    uint public totalVoters;
-    uint public totalVotesCasted;
-    bool public isVotingOpen;
-    bool public isRegistrationOpen;
+    uint private totalCandidates;
+    uint private totalVoters;
+    uint private totalVotesCasted;
+    uint256 public registrationStartTime;
+    uint256 public votingStartTime;
+    State private state;
+
+    event VoterRegistered(address voter);
+    event CandidateAdded(address candidateId);
+    event StateChanged(State newState);
+    event Voted(address voter, address candidateId);
+    event Winner(address Winner);
 
     constructor() {
         owner = msg.sender;
         totalCandidates = 0;
         totalVoters = 0;
         totalVotesCasted = 0;
-        isVotingOpen = false;
-        isRegistrationOpen = true;
-    }
-
-    function openVoting() public checkOwner {
-        isVotingOpen = true;
-        isRegistrationOpen = false;
-    }
-
-    function openRegistration() public checkOwner {
-        isRegistrationOpen = true;
-        isVotingOpen = false;
-    }
-
-    function closeVoting() public checkOwner {
-        isVotingOpen = false;
-    }
-
-    modifier checkVoter() {
-        require(
-            voterList[msg.sender].voterAddress != address(0),
-            "You are not registered as a voter"
-        );
-        _;
-    }
-
-    modifier checkCandidate() {
-        require(
-            candidateList[msg.sender].CandidateId != address(0),
-            "You are not registered as a candidate"
-        );
-        _;
+        state = State.Registration;
+        registrationStartTime = block.timestamp;
     }
 
     modifier checkOwner() {
-        require(msg.sender == owner, "You are not the owner of the contract");
+        if (msg.sender != owner) {
+            revert NotOwner();
+        }
         _;
     }
 
-    modifier checkVotingOpen() {
-        require(isVotingOpen == true, "Voting is not open");
+    modifier inState(State _state) {
+        require(state == _state, "Invalid state");
         _;
     }
 
-    modifier checkRegistrationOpen() {
-        require(isRegistrationOpen == true, "Registration is not open");
-        _;
-    }
-
-    function registerAsVoter() public checkRegistrationOpen {
-        require(
-            voterList[msg.sender].voterAddress == address(0),
-            "You are already registered as a voter"
-        );
-        // If the voter is not registered, then register the voter
-        // address(0) means that the voter is not registered
-        voterList[msg.sender].voterAddress = msg.sender;
-        voter_List.push(msg.sender);
+    function registerAsVoter() public inState(State.Registration) {
+        if (s_voterList[msg.sender].voterAddress != address(0)) {
+            revert AlreadyRegistered();
+        }
+        s_voterList[msg.sender].voterAddress = msg.sender;
+        s_voter_List.push(msg.sender);
         totalVoters++;
+        emit VoterRegistered(msg.sender);
     }
 
-    function registerAsCandidate() public checkRegistrationOpen {
-        require(
-            candidateList[msg.sender].CandidateId == address(0),
-            "You are already registered as a voter"
-        );
-        candidateList[msg.sender].CandidateId = msg.sender;
-        candidate_List.push(msg.sender);
+    function registerAsCandidate() public inState(State.Registration) {
+        if (s_candidateList[msg.sender].CandidateId != address(0)) {
+            revert AlreadyRegistered();
+        }
+        s_candidateList[msg.sender].CandidateId = msg.sender;
+        s_candidate_List.push(msg.sender);
         totalCandidates++;
+        emit CandidateAdded(msg.sender);
     }
 
-    function voterInfo(
-        address _voterAddress
-    ) public view returns (bool, address) {
+    function startVoting() public checkOwner inState(State.Registration){
         require(
-            voterList[_voterAddress].voterAddress != address(0),
-            "You are not registered as a voter"
+            block.timestamp >= registrationStartTime + REG_TIME,
+            "Registration period not over"
         );
-        return (
-            (
-                voterList[_voterAddress].voted,
-                voterList[_voterAddress].voterAddress
-            )
-        );
+        state = State.Voting;
+        votingStartTime = block.timestamp;
+        emit StateChanged(state);
     }
 
-    function candidateInfo(
-        address _candidateAddress
-    ) public view returns (uint, address) {
+    function endVoting() public checkOwner inState(State.Voting){
         require(
-            candidateList[_candidateAddress].CandidateId != address(0),
-            "You are not registered as a candidate"
+            block.timestamp >= votingStartTime + VOT_TIME,
+            "Voting period not over"
         );
-        return (
-            (
-                candidateList[_candidateAddress].VoteCount,
-                candidateList[_candidateAddress].CandidateId
-            )
-        );
+        state = State.Ended;
+        emit StateChanged(state);
     }
 
-    function withdrawCandidate() public checkRegistrationOpen checkCandidate {
-        delete candidateList[msg.sender];
-        // deletes deletes mapping but doesnot do that with the array
-        // it makes a gap in array
-        totalCandidates--;
-        for (uint i = 0; i < candidate_List.length; i++) {
-            if (candidate_List[i] == msg.sender) {
-                for (uint j = i; j < candidate_List.length - 1; j++) {
-                    candidate_List[j] = candidate_List[j + 1];
-                }
-                candidate_List.pop();
-                break;
-            }
+    function vote(address _candidateId) public inState(State.Voting){
+        if (s_voterList[msg.sender].voterAddress == address(0)) {
+            revert NotVoter();
         }
-    }
-
-    function withdrawVoter() public checkRegistrationOpen checkVoter {
-        delete voterList[msg.sender];
-        totalVoters--;
-        for (uint i = 0; i < voter_List.length; i++) {
-            if (voter_List[i] == msg.sender) {
-                for (uint j = i; j < voter_List.length - 1; j++) {
-                    voter_List[j] = voter_List[j + 1];
-                }
-                voter_List.pop();
-                break;
-            }
+        if (s_voterList[msg.sender].voted == true) {
+            revert AlreadyVoted();
         }
-    }
-
-    function getwinnerCandidate() public view checkOwner returns (address) {
-        return winner;
-    }
-
-    function vote(address _candidateId) public checkVotingOpen checkVoter {
-        require(
-            candidateList[_candidateId].CandidateId != address(0),
-            "He/She is not registered as a candidate"
-        );
-        require(
-            voterList[msg.sender].voted != true,
-            "You have already voted for a candidate"
-        );
-        voterList[msg.sender].voted = true;
-        voterList[msg.sender].vote = _candidateId;
+        if (s_candidateList[_candidateId].CandidateId != address(0)) {
+            revert NotCandidate();
+        }
+        s_voterList[msg.sender].voted = true;
+        s_voterList[msg.sender].vote = _candidateId;
         totalVotesCasted++;
-        candidateList[_candidateId].VoteCount++;
+        s_candidateList[_candidateId].VoteCount++;
+        emit Voted(msg.sender, _candidateId);
     }
 
-    function calculateWinner() public checkOwner {
-        require(isRegistrationOpen == false, "Registration is still open");
-        require(isVotingOpen == false, "Voting is still open");
-        require(totalVotesCasted > 0, "No votes have been casted yet");
+    function calculateWinner() public checkOwner inState(State.Ended) {
+        if (totalVotesCasted == 0) {
+            revert NoVotesCasted();
+        }
         uint maxVotes = 0;
-        for (uint i = 0; i < candidate_List.length; i++) {
-            if (candidateList[candidate_List[i]].VoteCount > maxVotes) {
-                maxVotes = candidateList[candidate_List[i]].VoteCount;
-                winner = candidateList[candidate_List[i]].CandidateId;
+        for (uint i = 0; i < s_candidate_List.length; i++) {
+            if (s_candidateList[s_candidate_List[i]].VoteCount > maxVotes) {
+                maxVotes = s_candidateList[s_candidate_List[i]].VoteCount;
+                winner = s_candidateList[s_candidate_List[i]].CandidateId;
             }
         }
+        getWinnerCandidate();
+        emit Winner(winner);
     }
 
-    function reset() public checkOwner {
-        for (uint i = 0; i < voter_List.length; i++) {
-            delete voterList[voter_List[i]];
+    function reset() public checkOwner inState(State.Ended) {
+        for (uint i = 0; i < s_voter_List.length; i++) {
+            delete s_voterList[s_voter_List[i]];
         }
-        for (uint i = 0; i < voter_List.length; i++) {
-            delete candidateList[voter_List[i]];
+        for (uint i = 0; i < s_voter_List.length; i++) {
+            delete s_candidateList[s_voter_List[i]];
         }
         totalCandidates = 0;
         totalVoters = 0;
         totalVotesCasted = 0;
-        openRegistration();
-        delete voter_List;
-        delete candidate_List;
+        state = State.Registration;
+        s_voter_List= new address[](0);
+        s_candidate_List = new address[](0);
     }
 
-    function getVoterList() public view returns (address[] memory) {
-        return voter_List;
+    /** Getter Functions */
+
+    function getVoterList() public view checkOwner returns (address[] memory) {
+        return s_voter_List;
     }
 
-    function getCandidateList() public view returns (address[] memory) {
-        return candidate_List;
+    function getCandidateList()
+        public
+        view
+        checkOwner
+        returns (address[] memory)
+    {
+        return s_candidate_List;
+    }
+
+    function getWinnerCandidate() public view checkOwner inState(State.Ended) returns (address) {
+        return winner;
+    }
+
+    function getVoterCount() public view returns (uint) {
+        return totalVoters;
+    }
+
+    function getCandidateCount() public view returns (uint) {
+        return totalCandidates;
+    }
+
+    function getVotesCasted() public view inState(State.Ended) returns (uint) {
+        return totalVotesCasted;
+    }
+
+    function getVoterInfo(
+        address _voterAddress
+    ) public view returns (bool, address) {
+        if (s_voterList[_voterAddress].voterAddress == address(0)) {
+            revert NotVoter();
+        }
+        return (
+            (
+                s_voterList[_voterAddress].voted,
+                s_voterList[_voterAddress].voterAddress
+            )
+        );
+    }
+
+    function getCandidateInfo(
+        address _candidateAddress
+    ) public view returns (uint, address) {
+        if (s_candidateList[_candidateAddress].CandidateId == address(0)) {
+            revert NotCandidate();
+        }
+        return (
+            (
+                s_candidateList[_candidateAddress].VoteCount,
+                s_candidateList[_candidateAddress].CandidateId
+            )
+        );
+    }
+
+    function checkUpkeep(
+        bytes calldata /* checkData */
+    )
+        external
+        view
+        override
+        returns (bool upkeepNeeded, bytes memory /* performData */)
+    {
+        if (
+            state == State.Registration &&
+            block.timestamp >= registrationStartTime + REG_TIME
+        ) {
+            upkeepNeeded = true;
+        } else if (
+            state == State.Voting &&
+            block.timestamp >= votingStartTime + VOT_TIME
+        ) {
+            upkeepNeeded = true;
+        } else {
+            upkeepNeeded = false;
+        }
+    }
+
+    function performUpkeep(bytes calldata /* performData */) external override {
+        if (
+            state == State.Registration &&
+            block.timestamp >= registrationStartTime + REG_TIME
+        ) {
+            startVoting();
+        } else if (
+            state == State.Voting &&
+            block.timestamp >= votingStartTime + VOT_TIME
+        ) {
+            endVoting();
+        }
     }
 }
+
+/*
+    // modifier checkVoter() {
+    //     if (s_voterList[msg.sender].voterAddress == address(0)) {
+    //         revert NotRegistered();
+    //     }
+    //     _;
+    // }
+
+    // modifier checkCandidate() {
+    //     if (s_candidateList[msg.sender].CandidateId != address(0)) {
+    //         revert NotRegistered();
+    //     }
+    //     _;
+    // }
+    */
+
+/*
+    // function withdrawCandidate() public checkRegistrationOpen checkCandidate {
+    //     delete s_candidateList[msg.sender];
+    //     // deletes deletes mapping but doesnot do that with the array
+    //     // it makes a gap in array
+    //     totalCandidates--;
+    //     for (uint i = 0; i < s_candidate_List.length; i++) {
+    //         if (s_candidate_List[i] == msg.sender) {
+    //             for (uint j = i; j < s_candidate_List.length - 1; j++) {
+    //                 s_candidate_List[j] = s_candidate_List[j + 1];
+    //             }
+    //             s_candidate_List.pop();
+    //             break;
+    //         }
+    //     }
+    // }
+
+    // function withdrawVoter() public checkRegistrationOpen checkVoter {
+    //     delete s_voterList[msg.sender];
+    //     totalVoters--;
+    //     for (uint i = 0; i < s_voter_List.length; i++) {
+    //         if (s_voter_List[i] == msg.sender) {
+    //             for (uint j = i; j < s_voter_List.length - 1; j++) {
+    //                 s_voter_List[j] = s_voter_List[j + 1];
+    //             }
+    //             s_voter_List.pop();
+    //             break;
+    //         }
+    //     }
+    // }
+    */
